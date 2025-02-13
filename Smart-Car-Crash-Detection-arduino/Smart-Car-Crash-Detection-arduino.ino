@@ -1,195 +1,145 @@
 #include <Wire.h>
-#include <NimBLEDevice.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <math.h>
+#include <WiFi.h>
 
-// BLE UUID definitions (you can change these if desired)
-#define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
-#define CHARACTERISTIC_UUID "abcdefab-1234-1234-1234-abcdefabcdef"
+// ========== OLED Display Configuration ========== //
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET -1    // Reset pin # (or -1 if sharing Arduino reset pin)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// MPU6050 I2C address
-const int MPU_addr = 0x68;
+// ========== MPU6050 Configuration ========== //
+const int MPU_addr = 0x68; // I2C address for MPU6050
 
 // Raw sensor data variables
-int16_t AcX, AcY, AcZ, Tmp, GyX, GyY, GyZ;
+int16_t AcX, AcY, AcZ, Tmp, GyX, GyY, GyZ, Amp, gyroMagnitude;
 
 // Processed sensor data (accelerometer in g's and gyroscope in °/s)
 float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
 
-// Fall detection state flags and counters
-boolean fall = false;
-boolean trigger1 = false;
-boolean trigger2 = false;
-boolean trigger3 = false;
-byte trigger1count = 0;
-byte trigger2count = 0;
-byte trigger3count = 0;
-int angleChange = 0;
+// Global variable for crash detection count (to filter out noise)
+int crashCount = 0;
 
-// BLE characteristic pointer (for sending notifications)
-NimBLECharacteristic* pCharacteristic;
+// Global variable to hold the time until which "CRASH DETECTED" is shown
+unsigned long crashDisplayUntil = 0;
 
-//
-// BLE Setup: Initializes the BLE server, service, and characteristic.
-//
-void setupBLE() {
-  NimBLEDevice::init("ESP32_Fall_Detect_BLE");  // Set device name
-  NimBLEServer* pServer = NimBLEDevice::createServer();
-  NimBLEService* pService = pServer->createService(SERVICE_UUID);
-  
-  pCharacteristic = pService->createCharacteristic(
-                       CHARACTERISTIC_UUID,
-                       NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-                     );
-  pCharacteristic->setValue("No Alert");
-  pService->start();
-
-  // Create advertisement data for the scan response
-  NimBLEAdvertisementData scanResponseData;
-  scanResponseData.setName("ESP32_Fall_Detect_BLE");
-
-  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponseData(scanResponseData);  // Use setScanResponseData()
-  pAdvertising->start();
-  Serial.println("BLE advertising started");
+// ========== OLED Display Setup ==========
+void setupOLED()
+{
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
+  {
+    Serial.println("OLED allocation failed");
+    while (true)
+      ;
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("OLED Initialized");
+  display.display();
+  delay(2000);
 }
 
-//
-// Setup: Initializes Serial, I2C (for MPU6050), BLE, and the MPU6050 sensor.
-//
-void setup() {
+// ============ Connect to WIFI=========== //
+void setupWifi()
+{
+}
+
+// ========== Setup ========== //
+void setup()
+{
   Serial.begin(115200);
-  Wire.begin();
-  
-  setupBLE();
+  Wire.begin(); // I2C initialization (default: SDA=8, SCL=9 on ESP32-S3)
+
+  setupOLED();
   initMPU();
 }
 
-//
-// Main loop: Reads sensor data, processes it, and checks for a fall.
-// If a fall is detected, a BLE notification is sent.
-//
-void loop() {
-  if (!mpu_read()) {
+// ========== Main Loop ========== //
+void loop()
+{
+
+  if (!mpu_read())
+  {
     Serial.println("Sensor read error");
+    // showError(0);
     delay(1000);
     return;
   }
-  
+
   processIMUData();
   detectFall();
+  updateOLED();
   delay(100);
 }
 
-//
-// Initializes the MPU6050 sensor
-//
-void initMPU() {
+// ========== MPU6050 Initialization ========== //
+void initMPU()
+{
   Wire.beginTransmission(MPU_addr);
-  Wire.write(0x6B);  // PWR_MGMT_1 register
-  Wire.write(0);     // Wake up the MPU6050
-  if (Wire.endTransmission(true) != 0) {
-    Serial.println("MPU6050 init error");
-  } else {
-    Serial.println("MPU6050 initialized");
-  }
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission(true);
 }
 
-//
-// Converts raw sensor readings into units (g and °/s)
-//
-void processIMUData() {
+// ========== Process Sensor Data ========== //
+void processIMUData()
+{
   ax = (AcX - 2050) / 16384.0;
   ay = (AcY - 77) / 16384.0;
   az = (AcZ - 1947) / 16384.0;
+
   gx = (GyX + 270) / 131.07;
   gy = (GyY - 351) / 131.07;
   gz = (GyZ + 136) / 131.07;
 }
 
-//
-// Fall detection algorithm: Checks acceleration and orientation changes.
-// When a crash is detected, it sends a BLE notification.
-//
-void detectFall() {
+// ========== Updated Crash Detection Algorithm ========== //
+void detectFall()
+{
   float Raw_Amp = sqrt(ax * ax + ay * ay + az * az);
-  int Amp = Raw_Amp * 10;
-  Serial.println(Amp);
+  Amp = Raw_Amp * 10;
 
-  if (Amp <= 2 && !trigger2) {
-    trigger1 = true;
-    Serial.println("Trigger 1 activated");
-  }
-  
-  if (trigger1) {
-    trigger1count++;
-    if (Amp >= 12) {
-      trigger2 = true;
-      Serial.println("Trigger 2 activated");
-      trigger1 = false;
-      trigger1count = 0;
+  gyroMagnitude = sqrt(gx * gx + gy * gy + gz * gz);
+
+  Serial.print("Amp: ");
+  Serial.print(Amp);
+  Serial.print("\t");
+  Serial.print("  Gyro: ");
+  Serial.println(gyroMagnitude);
+
+  if (Amp >= 60)
+  {
+    crashCount++;
+    if (crashCount >= 3)
+    {
+      Serial.println("CRASH WAS DETECTED");
+      crashDisplayUntil = millis() + 10000;
+      crashCount = 0;
     }
   }
-  
-  if (trigger2) {
-    trigger2count++;
-    angleChange = sqrt(gx * gx + gy * gy + gz * gz);
-    Serial.println(angleChange);
-    if (angleChange >= 30 && angleChange <= 400) {
-      trigger3 = true;
-      trigger2 = false;
-      trigger2count = 0;
-      Serial.println("Trigger 3 activated");
-    }
-  }
-  
-  if (trigger3) {
-    trigger3count++;
-    if (trigger3count >= 10) {
-      angleChange = sqrt(gx * gx + gy * gy + gz * gz);
-      Serial.println(angleChange);
-      if (angleChange >= 0 && angleChange <= 10) {
-        fall = true;
-        trigger3 = false;
-        trigger3count = 0;
-        Serial.println("CRASH WAS DETECTED");
-        // Send BLE notification with the alert message
-        pCharacteristic->setValue("CRASH WAS DETECTED");
-        pCharacteristic->notify();
-        fall = false;
-      } else {
-        trigger3 = false;
-        trigger3count = 0;
-        Serial.println("Trigger 3 deactivated");
-      }
-    }
-  }
-  
-  if (trigger2count >= 6) {
-    trigger2 = false;
-    trigger2count = 0;
-    Serial.println("Trigger 2 deactivated");
-  }
-  
-  if (trigger1count >= 6) {
-    trigger1 = false;
-    trigger1count = 0;
-    Serial.println("Trigger 1 deactivated");
+  else
+  {
+    crashCount = 0;
   }
 }
 
-//
-// Reads sensor data from the MPU6050. Returns true if successful.
-//
-bool mpu_read() {
+// ========== Read Sensor Data from MPU6050 ========== //
+bool mpu_read()
+{
   Wire.beginTransmission(MPU_addr);
-  Wire.write(0x3B);  // Starting register for accelerometer data
-  if (Wire.endTransmission(false) != 0) {
-    return false; // Sensor not detected
+  Wire.write(0x3B);
+  if (Wire.endTransmission(false) != 0)
+  {
+    return false;
   }
   Wire.requestFrom(MPU_addr, 14, true);
-  if (Wire.available() < 14) {
-    return false; // Data not received properly
+  if (Wire.available() < 14)
+  {
+    return false;
   }
   AcX = Wire.read() << 8 | Wire.read();
   AcY = Wire.read() << 8 | Wire.read();
@@ -199,4 +149,56 @@ bool mpu_read() {
   GyY = Wire.read() << 8 | Wire.read();
   GyZ = Wire.read() << 8 | Wire.read();
   return true;
+}
+
+// ========== Update OLED Display ========== //
+void updateOLED()
+{
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.setTextSize(1);
+
+  if (millis() < crashDisplayUntil)
+  {
+    display.setTextSize(2);
+    display.println("CRASH");
+    display.println("DETECTED!");
+  }
+  else
+  {
+    float Raw_Amp = sqrt(ax * ax + ay * ay + az * az);
+    int Amp = Raw_Amp * 10;
+
+    display.print("Amp: ");
+    display.println(Amp);
+    display.print("Gyro: ");
+    display.println((int)sqrt(gx * gx + gy * gy + gz * gz));
+    display.println("Status: Normal");
+
+    display.print("ax: ");
+    display.println(ax, 2);
+    display.print("ay: ");
+    display.println(ay, 2);
+    display.print("az: ");
+    display.println(az, 2);
+  }
+
+  display.display();
+}
+
+// ======== Show Error ========= //
+void showError(int e)
+{
+  switch (e)
+  {
+  case 0:
+    Serial.println("sensor error");
+    break;
+
+  case 1:
+    break;
+
+  default:
+    break;
+  }
 }
