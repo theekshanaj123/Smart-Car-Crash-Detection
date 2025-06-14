@@ -220,7 +220,7 @@ void processIMUData() {
   gz = (GyZ + 136) / 131.07;
 }
 
-// ========== Updated Crash Detection Algorithm ========== //
+// ========== Crash Detection Algorithm ========== //
 void detectFall() {
   float Raw_Amp = sqrt(ax * ax + ay * ay + az * az);
   Amp = Raw_Amp * 10;
