@@ -64,7 +64,7 @@ Install these libraries via Arduino Library Manager:
 ## 📲 Mobile App Integration
 
 - Any BLE scanner app can be used to test (e.g., **nRF Connect**, **LightBlue**).
-- Connect to the device and monitor the characteristic for crash messages.
+- Connect to the device and monitor the characteristics for crash messages.
 
 ## 👨‍👩‍👧‍👦 Team Members
 
@@ -74,11 +74,5 @@ Install these libraries via Arduino Library Manager:
 
 ### 👨‍🏫 Supervisor
 
-- **Priyashantha Tennakoon**, Lecturer
-
----
-
-## 📜 License
-
-This project is for educational and demonstration purposes.
+- **Mr. Priyashantha Tennakoon**, Lecturer
 
